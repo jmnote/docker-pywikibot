@@ -1,7 +1,8 @@
 name: Build
 
 # Builds and pushes the image of the Pywikibot release named by the tag (X.Y.Z): on a tag push, or run by
-# Tag (or by hand) on a tag. latest moves only for the highest tag, so rebuilding an older one keeps it.
+# Tag (or by hand) on a tag. Then creates the GitHub release of the tag. latest (image and release) moves only
+# for the highest tag, so rebuilding an older one keeps it.
 on:
   push:
     tags:
@@ -9,7 +10,7 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 concurrency:
@@ -84,3 +85,24 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           provenance: false
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$VERSION" -R "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release $VERSION exists"
+            exit 0
+          fi
+          notes=$(printf '%s\n' \
+            "Image of [Pywikibot $VERSION](https://github.com/${UPSTREAM_REPO}/tree/$VERSION) for ${PLATFORMS}." \
+            '' \
+            '```bash' \
+            "docker pull ${{ secrets.DOCKERHUB_USERNAME }}/${IMAGE_NAME}:$VERSION" \
+            "docker pull ghcr.io/${{ github.repository_owner }}/${IMAGE_NAME}:$VERSION" \
+            '```')
+          gh release create "$VERSION" -R "${{ github.repository }}" --verify-tag \
+            --title "Pywikibot $VERSION" --notes "$notes" --latest=${{ steps.version.outputs.latest }}
