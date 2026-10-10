@@ -1,8 +1,11 @@
 name: Build
 
+# Builds and pushes the image of the Pywikibot release named by the tag (X.Y.Z): on a tag push, or run by
+# Tag (or by hand) on a tag. latest moves only for the highest tag, so rebuilding an older one keeps it.
 on:
-  schedule:
-    - cron: "0 0 * * 0"
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
   workflow_dispatch: {}
 
 permissions:
@@ -12,7 +15,7 @@ permissions:
 concurrency:
   group: pywikibot-images
   cancel-in-progress: false
-  
+
 env:
   UPSTREAM_REPO: wikimedia/pywikibot
   IMAGE_NAME: pywikibot
@@ -22,26 +25,28 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Decide latest upstream tag
-        id: upstream
+      - name: Check the tag
+        id: version
         shell: bash
         run: |
           set -euo pipefail
-          tags=$(
-            git ls-remote --tags --refs "https://github.com/${UPSTREAM_REPO}.git" \
+          version="${{ github.ref_name }}"
+          if [ "${{ github.ref_type }}" != tag ] || ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Run on an X.Y.Z tag, not ${{ github.ref_type }} $version" >&2
+            exit 1
+          fi
+          highest=$(
+            git ls-remote --tags --refs "https://github.com/${{ github.repository }}.git" \
               | awk -F/ '{print $NF}' \
               | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
-              | sort -V
+              | sort -V | tail -n 1
           )
-          latest="$(echo "$tags" | tail -n 1)"
-          if [ -z "$latest" ]; then
-            echo "No semver tags found" >&2; exit 1
-          fi
-          echo "latest=$latest" >> "$GITHUB_OUTPUT"
-          echo "Found latest upstream tag: $latest"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "latest=$([ "$version" = "$highest" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "Building $version (highest tag: $highest)"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Docker metadata
         id: meta
@@ -51,10 +56,10 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
             ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=semver,pattern={{version}},value=${{ steps.upstream.outputs.latest }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ steps.upstream.outputs.latest }}
-            type=semver,pattern={{major}},value=${{ steps.upstream.outputs.latest }}
-            type=raw,value=latest
+            type=semver,pattern={{version}},value=${{ steps.version.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.version.outputs.version }}
+            type=semver,pattern={{major}},value=${{ steps.version.outputs.version }}
+            type=raw,value=latest,enable=${{ steps.version.outputs.latest }}
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -69,28 +74,10 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Check if tag already exists
-        id: exists
-        shell: bash
-        run: |
-          tag="${{ steps.upstream.outputs.latest }}"
-          ghcr_img="ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$tag"
-          dhub_img="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:$tag"
-
-          if docker manifest inspect "$ghcr_img" >/dev/null 2>&1 && \
-             docker manifest inspect "$dhub_img" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Image $tag already exists on both registries."
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "Image $tag missing on at least one registry."
-          fi
-
       - name: Build and push
-        if: steps.exists.outputs.exists != 'true'
         uses: docker/build-push-action@v6
         with:
-          context: https://github.com/${{ env.UPSTREAM_REPO }}.git#refs/tags/${{ steps.upstream.outputs.latest }}
+          context: https://github.com/${{ env.UPSTREAM_REPO }}.git#refs/tags/${{ steps.version.outputs.version }}
           file: Dockerfile
           platforms: ${{ env.PLATFORMS }}
           push: true

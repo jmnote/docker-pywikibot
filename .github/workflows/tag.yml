@@ -1,0 +1,50 @@
+name: Tag
+
+# Weekly, tag this repository with the latest stable Pywikibot release (X.Y.Z) if it is not tagged yet, and
+# build it. A tag pushed with GITHUB_TOKEN does not trigger the push workflows, so Build is dispatched on it.
+on:
+  schedule:
+    - cron: "0 0 * * 0"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  actions: write
+
+env:
+  UPSTREAM_REPO: wikimedia/pywikibot
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Tag the latest upstream release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          latest=$(
+            git ls-remote --tags --refs "https://github.com/${UPSTREAM_REPO}.git" \
+              | awk -F/ '{print $NF}' \
+              | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+              | sort -V | tail -n 1
+          )
+          [ -n "$latest" ] || { echo "No X.Y.Z tags in ${UPSTREAM_REPO}" >&2; exit 1; }
+          if git rev-parse -q --verify "refs/tags/$latest" >/dev/null; then
+            echo "$latest is already tagged"
+            exit 0
+          fi
+          git tag "$latest"
+          git push origin "refs/tags/$latest"
+          gh workflow run build.yml --ref "$latest"
+          echo "Tagged $latest and started Build on it"
+
+      # GitHub disables scheduled workflows after 60 days without repository activity.
+      - name: Keep the schedule enabled
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/tag.yml/enable"
